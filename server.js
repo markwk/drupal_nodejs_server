@@ -108,7 +108,7 @@ var authenticateClient = function (client, message) {
     if (backendSettings.debug) {
       console.log('Reusing existing authentication data for key:', message.authToken, ', client id:', client.id);
     }
-    setupClientConnection(client.id, authenticatedClients[message.authToken]);
+    setupClientConnection(client.id, authenticatedClients[message.authToken], message.contentTokens);
   }
   else {
     message.messageType = 'authenticate';
@@ -122,6 +122,7 @@ var authenticateClient = function (client, message) {
  */
 var authenticateClientCallback = function (response) {
   var requestBody = '';
+  response.setEncoding('utf8');
   response.on('data', function (chunk) {
     requestBody += chunk;
   });
@@ -135,7 +136,6 @@ var authenticateClientCallback = function (response) {
       }
       return;
     }
-    response.setEncoding('utf8');
     var authData = false;
     try {
       authData = JSON.parse(requestBody);
@@ -151,16 +151,16 @@ var authenticateClientCallback = function (response) {
       console.log('Invalid service key "', authData.serviceKey, '"');
       return;
     }
-    if (authData.nodejs_valid_auth_key) {
+    if (authData.nodejsValidAuthToken) {
       if (backendSettings.debug) {
         console.log('Valid login for uid "', authData.uid, '"');
       }
-      authenticatedClients[authData.auth_key] = authData;
-      setupClientConnection(authData.clientId, authData);
+      setupClientConnection(authData.clientId, authData, authData.contentTokens);
+      authenticatedClients[authData.authToken] = authData;
     }
     else {
       console.log('Invalid login for uid "', authData.uid, '"');
-      delete authenticatedClients[authData.auth_key];
+      delete authenticatedClients[authData.authToken];
     }
   });
 }
@@ -390,12 +390,13 @@ var kickUser = function (request, response) {
 var logoutUser = function (request, response) {
   var authToken = request.params.authtoken || '';
   if (authToken) {
+    console.log('Logging out http session', authToken);
     // Delete the user from the authenticatedClients hash.
     delete authenticatedClients[authToken];
 
     // Destroy any socket connections associated with this authToken.
     for (var clientId in io.sockets.sockets) {
-      if (io.sockets.sockets[clientId].authToken == request.params.authToken) {
+      if (io.sockets.sockets[clientId].authToken == authToken) {
         delete io.sockets.sockets[clientId];
         // Delete any channel entries for this clientId.
         for (var channel in channels) {
@@ -421,7 +422,7 @@ var getNodejsSessionIdsFromUid = function (uid) {
     }
   }
   if (backendSettings.debug) {
-    console.log('getNodejsSessionIdsFromUid', {uid: sessionIds});
+    console.log('getNodejsSessionIdsFromUid', {uid: uid, sessionIds: sessionIds});
   }
   return sessionIds;
 }
@@ -437,7 +438,7 @@ var getNodejsSessionIdsFromAuthToken = function (authToken) {
     }
   }
   if (backendSettings.debug) {
-    console.log('getNodejsSessionIdsFromAuthToken', {authToken: sessionIds});
+    console.log('getNodejsSessionIdsFromAuthToken', {authToken: authToken, sessionIds: sessionIds});
   }
   return sessionIds;
 }
@@ -720,7 +721,7 @@ var setUserPresenceList = function (uid, uids) {
  */
 var cleanupSocket = function (socket) {
   if (backendSettings.debug) {
-    console.log("Cleaning up after socket " + socket.id);
+    console.log("Cleaning up after socket id", socket.id, 'uid', socket.uid);
   }
   for (var channel in channels) {
     delete channels[channel].sessionIds[socket.id];
@@ -732,6 +733,11 @@ var cleanupSocket = function (socket) {
     }
     presenceTimeoutIds[uid] = setTimeout(checkOnlineStatus, 2000, uid);
   }
+
+  for (var tokenChannel in tokenChannels) {
+    delete tokenChannels[tokenChannel].sockets[socket.id];
+  }
+
   delete io.sockets.sockets[socket.id];
 }
 
@@ -789,7 +795,7 @@ var setContentToken = function (request, response) {
 /**
  * Setup a io.sockets.sockets{}.connection with uid, channels etc.
  */
-var setupClientConnection = function (sessionId, authData) {
+var setupClientConnection = function (sessionId, authData, contentTokens) {
   if (!io.sockets.sockets[sessionId]) {
     console.log("Client socket '" + sessionId + "' went away.");
     console.log(authData);
@@ -808,16 +814,18 @@ var setupClientConnection = function (sessionId, authData) {
       sendPresenceChangeNotification(authData.uid, 'online');
     }
   }
-
-  for (var tokenChannel in authData.contentTokens) {
+ 
+  var clientToken = '';
+  for (var tokenChannel in contentTokens) {
     tokenChannels[tokenChannel] = tokenChannels[tokenChannel] || {'tokens': {}, 'sockets': {}};
-    for (var token in tokenChannels[tokenChannel].tokens) {
-      if (token == authData.contentTokens[tokenChannel]) {
-        tokenChannels[tokenChannel].sockets[sessionId] = true;
-        if (backendSettings.debug) {
-          console.log('Added token', token, 'for channel', tokenChannel, 'for socket', sessionId);
-        }
+
+    clientToken = contentTokens[tokenChannel];
+    if (tokenChannels[tokenChannel].tokens[clientToken]) {
+      tokenChannels[tokenChannel].sockets[sessionId] = true;
+      if (backendSettings.debug) {
+        console.log('Added token', clientToken, 'for channel', tokenChannel, 'for socket', sessionId);
       }
+      delete tokenChannels[tokenChannel].tokens[clientToken];
     }
   }
 
